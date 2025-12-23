@@ -710,16 +710,14 @@ function FeatureModule.Init(Window, Reg, WindUI, LocalPlayer)
     table.insert(FlySystem.Connections, flyRespawnConn)
     
     -- ============================================================
-    -- WALKFLING SYSTEM (NAMELESS ADMIN STYLE)
+    -- WALKFLING SYSTEM (FIXED - NO FLOAT/FLING SELF)
     -- ============================================================
     local WalkFlingSystem = {}
     _G.SynceHub.WalkFlingSystem = WalkFlingSystem
     
     WalkFlingSystem.Active = false
-    WalkFlingSystem.Power = 500
+    WalkFlingSystem.Power = 750
     WalkFlingSystem.Connections = {}
-    WalkFlingSystem.BV = nil
-    WalkFlingSystem.BG = nil
     
     function WalkFlingSystem.Toggle()
         WalkFlingSystem.Active = not WalkFlingSystem.Active
@@ -732,71 +730,44 @@ function FeatureModule.Init(Window, Reg, WindUI, LocalPlayer)
         if not hrp or not humanoid then return false end
         
         if WalkFlingSystem.Active then
-            -- Backup original properties
-            _G.SynceHub.FlingBackup = {
-                WalkSpeed = humanoid.WalkSpeed,
-                JumpPower = humanoid.JumpPower,
-                HipHeight = humanoid.HipHeight,
-            }
-            
-            -- Modify humanoid for fling
-            humanoid.WalkSpeed = 16
-            humanoid.JumpPower = 50
-            humanoid.HipHeight = 0
-            
-            -- Make body parts massless
+            -- Make all body parts massless except HRP
             for _, part in pairs(character:GetDescendants()) do
-                if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                if part:IsA("BasePart") then
+                    part.CanCollide = false
                     part.Massless = true
                 end
             end
             
-            -- Create BodyVelocity
-            WalkFlingSystem.BV = Instance.new("BodyVelocity")
-            WalkFlingSystem.BV.Name = "FlingVelocity"
-            WalkFlingSystem.BV.Parent = hrp
-            WalkFlingSystem.BV.MaxForce = Vector3.new(0, 0, 0)
-            WalkFlingSystem.BV.Velocity = Vector3.new(0, 0, 0)
+            -- Re-enable HRP collision
+            hrp.CanCollide = true
             
-            -- Create BodyGyro
-            WalkFlingSystem.BG = Instance.new("BodyGyro")
-            WalkFlingSystem.BG.Name = "FlingGyro"
-            WalkFlingSystem.BG.Parent = hrp
-            WalkFlingSystem.BG.MaxTorque = Vector3.new(0, 0, 0)
-            WalkFlingSystem.BG.P = 1000
-            WalkFlingSystem.BG.D = 50
+            -- Disable fall/ragdoll
+            humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+            humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
             
-            -- Main fling loop
-            WalkFlingSystem.Connections.fling = _G.SynceHub.RunService.Heartbeat:Connect(function()
-                if not WalkFlingSystem.Active then return end
-                
-                local char = LocalPlayer.Character
-                if not char then return end
-                
-                local root = char:FindFirstChild("HumanoidRootPart")
-                local hum = char:FindFirstChildOfClass("Humanoid")
-                if not root or not hum then return end
-                
-                -- Update body movers
-                if WalkFlingSystem.BV and WalkFlingSystem.BV.Parent then
-                    WalkFlingSystem.BV.MaxForce = Vector3.new(9e9, 9e9, 9e9)
-                    WalkFlingSystem.BV.Velocity = root.CFrame.lookVector * WalkFlingSystem.Power
-                end
-                
-                if WalkFlingSystem.BG and WalkFlingSystem.BG.Parent then
-                    WalkFlingSystem.BG.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
-                    WalkFlingSystem.BG.CFrame = root.CFrame
-                end
-                
-                -- Keep character upright
-                root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, math.rad(hum.MoveDirection.X * 90), 0)
-            end)
+            -- Create spinning part (invisible hitbox)
+            local flingPart = Instance.new("Part")
+            flingPart.Name = "WalkFlingPart"
+            flingPart.Size = Vector3.new(5, 5, 5)
+            flingPart.Transparency = 1
+            flingPart.CanCollide = true
+            flingPart.Massless = false
+            flingPart.CustomPhysicalProperties = PhysicalProperties.new(100, 0.3, 0, 0, 0)
+            flingPart.Parent = workspace
             
-            -- Respawn connection
-            WalkFlingSystem.Connections.respawn = LocalPlayer.CharacterAdded:Connect(function()
-                task.wait(0.5)
-                WalkFlingSystem.Cleanup()
-            end)
+            -- Create weld to keep part attached
+            local weld = Instance.new("WeldConstraint")
+            weld.Part0 = hrp
+            weld.Part1 = flingPart
+            weld.Parent = flingPart
+            
+            -- Add spinning velocity to hitbox
+            local bav = Instance.new("BodyAngularVelocity")
+            bav.Name = "FlingVelocity"
+            bav.Parent = flingPart
+            bav.MaxTorque = Vector3.new(0, math.huge, 0)
+            bav.AngularVelocity = Vector3.new(0, WalkFlingSystem.Power, 0)
+            bav.P = 1000000
             
         else
             WalkFlingSystem.Cleanup()
@@ -808,53 +779,50 @@ function FeatureModule.Init(Window, Reg, WindUI, LocalPlayer)
     function WalkFlingSystem.SetPower(power)
         if tonumber(power) then
             WalkFlingSystem.Power = tonumber(power)
+            
+            -- Update if active
+            if WalkFlingSystem.Active then
+                local flingPart = workspace:FindFirstChild("WalkFlingPart")
+                if flingPart and flingPart:FindFirstChild("FlingVelocity") then
+                    flingPart.FlingVelocity.AngularVelocity = Vector3.new(0, WalkFlingSystem.Power, 0)
+                end
+            end
         end
     end
     
     function WalkFlingSystem.Cleanup()
         WalkFlingSystem.Active = false
         
-        -- Disconnect all connections
-        for _, conn in pairs(WalkFlingSystem.Connections) do
-            if conn and conn.Connected then
-                conn:Disconnect()
-            end
+        -- Remove fling part
+        local flingPart = workspace:FindFirstChild("WalkFlingPart")
+        if flingPart then
+            flingPart:Destroy()
         end
-        WalkFlingSystem.Connections = {}
         
         local character = LocalPlayer.Character
         if character then
-            local hrp = character:FindFirstChild("HumanoidRootPart")
-            
-            -- Remove body movers
-            if hrp then
-                if hrp:FindFirstChild("FlingVelocity") then
-                    hrp.FlingVelocity:Destroy()
-                end
-                if hrp:FindFirstChild("FlingGyro") then
-                    hrp.FlingGyro:Destroy()
-                end
-            end
-            
-            -- Restore massless
+            -- Restore collision
             for _, part in pairs(character:GetDescendants()) do
-                if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                if part:IsA("BasePart") then
+                    part.CanCollide = true
                     part.Massless = false
                 end
             end
             
-            -- Restore humanoid properties
+            -- Re-enable humanoid states
             local humanoid = character:FindFirstChildOfClass("Humanoid")
-            if humanoid and _G.SynceHub.FlingBackup then
-                humanoid.WalkSpeed = _G.SynceHub.FlingBackup.WalkSpeed or 16
-                humanoid.JumpPower = _G.SynceHub.FlingBackup.JumpPower or 50
-                humanoid.HipHeight = _G.SynceHub.FlingBackup.HipHeight or 0
+            if humanoid then
+                humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
+                humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
             end
         end
-        
-        WalkFlingSystem.BV = nil
-        WalkFlingSystem.BG = nil
     end
+    
+    -- Auto cleanup on respawn
+    LocalPlayer.CharacterAdded:Connect(function()
+        task.wait(0.5)
+        WalkFlingSystem.Cleanup()
+    end)
     
     -- ============================================================
     -- ANTI-FLING SYSTEM
